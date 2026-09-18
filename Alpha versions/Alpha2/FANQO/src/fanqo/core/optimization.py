@@ -11,10 +11,11 @@ import math
 import time
 
 import numpy as np
+import scipy.sparse as sps
 from scipy.optimize import minimize
 
-import linear_lattice as lin
-import nonlinear as nl
+from . import linear as lin
+from . import nonlinear as nl
 
 
 # =============================================================================
@@ -133,6 +134,8 @@ def apply_candidate(context, v, vary):
     v = np.asarray(v, dtype=float)
     if len(v) != len(vary):
         raise ValueError(f"Expected {len(vary)} variables, received {len(v)}.")
+    if not np.all(np.isfinite(v)):
+        raise ValueError("Candidate values must be finite.")
 
     p = dict(context["parameters"])
     edited = []
@@ -147,35 +150,40 @@ def apply_candidate(context, v, vary):
 
     settings = context["settings"]
     linear_changed = bool(set(edited) & settings["linear_variables"])
+    snapshot = _snapshot_mutable_context(context)
 
-    lattice, data, correction, p = lin.update_linear(
-        lattice=context["lattice"],
-        data=context["data"],
-        parameters=p,
-        edited_variables=edited,
-        correct_chromatic=settings["correct_chromatic"],
-        family1=settings["family1"],
-        family2=settings["family2"],
-        target_chrom_x=settings["target_chrom_x"],
-        target_chrom_y=settings["target_chrom_y"],
-        repetitions=settings["repetitions"],
-        step=settings["step"],
-        linear_variables=settings["linear_variables"],
-        chromatic_variables=settings["chromatic_variables"],
-        parameter_map=settings["parameter_map"],
-        magnet_builder=settings["magnet_builder"],
-        correction_parameter_map=settings["correction_parameter_map"],
-        energy_parameter=settings["energy_parameter"],
-    )
+    try:
+        lattice, data, correction, p = lin.update_linear(
+            lattice=context["lattice"],
+            data=context["data"],
+            parameters=p,
+            edited_variables=edited,
+            correct_chromatic=settings["correct_chromatic"],
+            family1=settings["family1"],
+            family2=settings["family2"],
+            target_chrom_x=settings["target_chrom_x"],
+            target_chrom_y=settings["target_chrom_y"],
+            repetitions=settings["repetitions"],
+            step=settings["step"],
+            linear_variables=settings["linear_variables"],
+            chromatic_variables=settings["chromatic_variables"],
+            parameter_map=settings["parameter_map"],
+            magnet_builder=settings["magnet_builder"],
+            correction_parameter_map=settings["correction_parameter_map"],
+            energy_parameter=settings["energy_parameter"],
+        )
 
-    context["lattice"] = lattice
-    context["data"] = data
-    context["parameters"] = dict(p)
-    if correction is not None:
-        context["correction"] = correction
+        context["lattice"] = lattice
+        context["data"] = data
+        context["parameters"] = dict(p)
+        if correction is not None:
+            context["correction"] = correction
 
-    if linear_changed:
-        _refresh_nonlinear_normalization(context["state"], data)
+        if linear_changed:
+            _refresh_nonlinear_normalization(context["state"], data)
+    except Exception:
+        _restore_mutable_context(context, snapshot)
+        raise
 
 
 # =============================================================================
@@ -199,15 +207,25 @@ def nonlinear_transfer(context, tol):
     state = context["state"]
     transfer = np.eye(len(state["idx_to_vec"]), dtype=float)
     cache = context["map_cache"]
+    active_cache = {}
 
     for elem in context["lattice"]:
         key = _magnet_signature(elem)
-        tmatrix = cache.get(key)
-        if tmatrix is None:
-            tmatrix = nl.element_transfer(elem, state, tol=tol)[0]
-            cache[key] = tmatrix
+        cached = active_cache.get(key)
+        if cached is None:
+            cached = cache.get(key)
+            if cached is None:
+                tmatrix = nl.element_transfer(elem, state, tol=tol)[0]
+                cached = sps.csr_matrix(tmatrix)
+            else:
+                tmatrix = cached.toarray()
+            active_cache[key] = cached
+        else:
+            tmatrix = cached.toarray()
         transfer = tmatrix @ transfer
 
+    cache.clear()
+    cache.update(active_cache)
     q = state["quad_size"]
     return transfer, transfer[q:, q:], transfer[q:, :q]
 
@@ -227,8 +245,49 @@ def _horizontal_invariant(context, tol):
     return Ix, Sx
 
 
+def _copy_value(value):
+    try:
+        return value.copy()
+    except AttributeError:
+        return value
+
+
+def _snapshot_mutable_context(context):
+    magnets = []
+    for elem in lin.unique_magnets(context["lattice"]):
+        magnets.append((elem, [_copy_value(value) for value in elem]))
+
+    state = context["state"]
+    state_values = {
+        key: _copy_value(state[key])
+        for key in ("C", "linear_cs0", "D_x", "D_px")
+        if key in state
+    }
+    return {
+        "magnets": magnets,
+        "data": [_copy_value(value) for value in context["data"]],
+        "parameters": dict(context["parameters"]),
+        "correction": _copy_value(context["correction"]),
+        "state": state_values,
+        "map_cache": dict(context["map_cache"]),
+    }
+
+
+def _restore_mutable_context(context, snapshot):
+    for elem, saved in snapshot["magnets"]:
+        elem[:] = [_copy_value(value) for value in saved]
+    context["data"] = [_copy_value(value) for value in snapshot["data"]]
+    context["parameters"] = dict(snapshot["parameters"])
+    context["correction"] = _copy_value(snapshot["correction"])
+    for key, value in snapshot["state"].items():
+        context["state"][key] = _copy_value(value)
+    context["map_cache"].clear()
+    context["map_cache"].update(snapshot["map_cache"])
+
+
 def evaluate_candidate(context, v, vary, gradient_weight, tol, invalid_penalty):
     """Update one candidate and return the new horizontal objective."""
+    snapshot = _snapshot_mutable_context(context)
     try:
         apply_candidate(context, v, vary)
         Ix, Sx = _horizontal_invariant(context, tol)
@@ -239,9 +298,11 @@ def evaluate_candidate(context, v, vary, gradient_weight, tol, invalid_penalty):
             gradient_weight=gradient_weight,
         )
         if not np.isfinite(objective):
+            _restore_mutable_context(context, snapshot)
             return float(invalid_penalty)
         return float(objective)
-    except (ValueError, KeyError, FloatingPointError, np.linalg.LinAlgError):
+    except (ValueError, KeyError, OverflowError, FloatingPointError, np.linalg.LinAlgError):
+        _restore_mutable_context(context, snapshot)
         return float(invalid_penalty)
 
 

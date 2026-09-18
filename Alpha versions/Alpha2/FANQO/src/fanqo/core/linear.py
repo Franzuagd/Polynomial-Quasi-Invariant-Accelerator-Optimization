@@ -228,9 +228,10 @@ def propagate_linear_functions(lattice, cs0, disp0, step):
             beta_x_i = cs[0]
             beta_y_i = cs[3]
 
-            if elem[4] != 0.0:
-                chromx += ds * beta_x_i * elem[4]
-                chromy += ds * beta_y_i * elem[4]
+            k_eff = elem[4] - 2.0 * disp[0] * elem[5]
+            if k_eff != 0.0:
+                chromx += ds * beta_x_i * k_eff
+                chromy += ds * beta_y_i * k_eff
 
             if elem[1] == "bending" and elem[3] != 0.0:
                 h = math.radians(elem[3]) / elem[2]
@@ -640,6 +641,8 @@ def prepare_lattice(
         )
 
         correction = [family1, S1, family2, S2, corrected_x, corrected_y]
+        data[_linear_data_index("CHROM_X")] = corrected_x
+        data[_linear_data_index("CHROM_Y")] = corrected_y
 
         for family, strength in ((family1, S1), (family2, S2)):
             parameter_name = correction_parameter_map.get(family)
@@ -670,6 +673,7 @@ def update_linear( #Updating the linear data when changed some varialbes
 ):
     """Update edited parameters and repeat only the affected calculations."""
     p = parameters.copy()
+    data = list(data)
     edited = set(edited_variables)
     linear_variables = set(linear_variables)
     chromatic_variables = set(chromatic_variables)
@@ -719,11 +723,19 @@ def update_linear( #Updating the linear data when changed some varialbes
             step=step,
         )
         correction = [family1, S1, family2, S2, corrected_x, corrected_y]
+        data[_linear_data_index("CHROM_X")] = corrected_x
+        data[_linear_data_index("CHROM_Y")] = corrected_y
 
         for family, strength in ((family1, S1), (family2, S2)):
             parameter_name = correction_parameter_map.get(family)
             if parameter_name is not None:
                 p[parameter_name] = strength
+    elif chromatic_changed and not linear_changed:
+        chrom_x, chrom_y = chromaticity_with_sextupoles(
+            lattice, repetitions=repetitions, step=step
+        )
+        data[_linear_data_index("CHROM_X")] = chrom_x
+        data[_linear_data_index("CHROM_Y")] = chrom_y
 
     return lattice, data, correction, p
 
@@ -762,67 +774,3 @@ def check_linear_lattice(lattice, data):
         cs_identity_y,
         bending_ring,
     ]
-
-
-def print_linear_summary(data, energy, correction=None):
-    bx, ax, gx, by, ay, gy = data[0]
-
-    print("=" * 80)
-    print("LINEAR LATTICE REPORT")
-    print("=" * 80)
-    print("Beta functions at s = 0")
-    print(f"Ax = {ax:.10g}   Ay = {ay:.10g}")
-    print(f"Bx = {bx:.10g}   By = {by:.10g}")
-    print(f"Gx = {gx:.10g}   Gy = {gy:.10g}")
-    print("-" * 80)
-    print("Ring")
-    print(f"Energy          = {energy}")
-    print(f"Nux             = {data[4]}")
-    print(f"Nuy             = {data[5]}")
-    print(f"Natural Chromx  = {data[6]}")
-    print(f"Natural Chromy  = {data[7]}")
-    print(f"Emitx           = {data[8]}")
-    print(f"Circumference   = {data[9]}")
-
-    if correction is not None:
-        print("-" * 80)
-        print("Chromatic correction")
-        print(f"{correction[0]} = {correction[1]}")
-        print(f"{correction[2]} = {correction[3]}")
-        print(f"Corrected Chromx = {correction[4]}")
-        print(f"Corrected Chromy = {correction[5]}")
-
-    print("=" * 80)
-
-
-def print_linear_checks(checks):
-    """Print the result returned by check_linear_lattice()."""
-    print("=" * 80)
-    print("LINEAR CONSISTENCY CHECKS")
-    print("=" * 80)
-    print(f"Symplectic error       = {checks[0]:.6e}")
-    print(f"Twiss closure          = {checks[1]:.6e}")
-    print(f"Dispersion closure     = {checks[2]:.6e}")
-    print(f"CS identity x error    = {checks[3]:.6e}")
-    print(f"CS identity y error    = {checks[4]:.6e}")
-    print(f"Total bending [deg]    = {checks[5]:.12f}")
-    print("=" * 80)
-
-
-def plot_linear_functions(data):
-    """Plot beta functions and horizontal dispersion."""
-    import matplotlib.pyplot as plt
-
-    s_values = data[10]
-    cs_values = data[11]
-    disp_values = data[12]
-
-    plt.plot(s_values, cs_values[:, 0], label=r"$\beta_x$")
-    plt.plot(s_values, cs_values[:, 3], label=r"$\beta_y$")
-    plt.plot(s_values, 100.0 * disp_values[:, 0], label=r"$100D_x$")
-    plt.xlabel("s [m]")
-    plt.ylabel("Linear functions [m]")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.show()

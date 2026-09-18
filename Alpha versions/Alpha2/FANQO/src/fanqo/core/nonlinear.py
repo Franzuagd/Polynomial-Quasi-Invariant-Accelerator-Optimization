@@ -2,9 +2,9 @@
 
 This module contains only imports and reusable functions.  It has no machine-
 specific Hamiltonian, polynomial order, phase-space box, plotting settings, or
-executable main().  Those choices belong in nonlinear_config.py and the runner.
+executable main().  Those choices belong in general_config.py and the runner.
 
-The linear accelerator itself is supplied by linear_lattice.py/lattice_config.py.
+The linear accelerator itself is supplied by linear_lattice.py and the lattice file selected by general_config.py.
 """
 
 import math
@@ -18,7 +18,7 @@ import scipy.sparse as sps
 import sympy as sp
 from scipy.linalg import expm
 
-import linear_lattice as lin
+from . import linear as lin
 
 
 def poly_to_vector(poly, variables, vec_to_idx):
@@ -126,7 +126,7 @@ def load(m, d, hamiltonian, a_box, variables, field_symbols, n=2):
     d : int
         Maximum delta degree.
     hamiltonian : sympy expression
-        User-specified Hamiltonian from nonlinear_config.py.
+        User-specified Hamiltonian from general_config.py.
     a_box : sequence
         Physical half-widths ordered exactly like ``variables``.
     variables : sequence of sympy.Symbol
